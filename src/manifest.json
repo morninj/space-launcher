@@ -3,8 +3,15 @@
   "name": "Homepage Links",
   "version": "0.1.0",
   "description": "Replaces the new tab page.",
-  "permissions": ["storage"],
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA39zzPt3MpEgVN1Oz8TyEIBPpoZLbBZdyXqTH58Zrn4REODYYMeM7AYdFlruGOS3Ak18bQ9j1dSdxibEUjfxJE5RxS+GuMrILP0dvZV3rKx1WOgcZoFDeEW1tTuUCYaE5wSLKIMmRfgfIyFR7HWGfECTv4hE6qzVPpqDfCT86Nr0sExHeRzH0kRZbm+eexSMtEiB7Sue1CpTI84oDjzylDyNS5i66lla8ECnvQKt4vxZkblnOmZeyyN+a43bXZ7QgqfEhoIKnDNTc64etNevGKwWrEquGu4aZAy9xZYuLpGXtikk3BVaJ23PQycV/rWlZCZzqRYRsmmz5sveM365lPwIDAQAB",
+  "permissions": [
+    "storage",
+    "tabs"
+  ],
   "chrome_url_overrides": {
     "newtab": "newtab.html"
+  },
+  "background": {
+    "service_worker": "background.js"
   }
 }
