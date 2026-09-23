@@ -24,22 +24,6 @@ function noise2(x, y) {
   return a * (1 - u) * (1 - v) + b * u * (1 - v) + c * (1 - u) * v + d * u * v;
 }
 
-function channels(hex) {
-  return [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
-}
-
-function hueOf(hex) {
-  const [r, g, b] = channels(hex).map((c) => c / 255);
-  const max = Math.max(r, g, b);
-  const min = Math.min(r, g, b);
-  if (max === min) return 0;
-  const d = max - min;
-  const h =
-    max === r ? (g - b) / d + (g < b ? 6 : 0) : max === g ? (b - r) / d + 2 : (r - g) / d + 4;
-  return h * 60;
-}
-
-
 const canvas = document.getElementById("sky");
 const ctx = canvas.getContext("2d");
 const haze = document.getElementById("haze");
@@ -53,6 +37,14 @@ const spread = 50 + hash2(2, 0) * 110;
 const turns = 2 + hash2(3, 0) * 3;
 const churn = 0.00004 + hash2(4, 0) * 0.00007;
 
+// The palette is re-rolled too: a hue for the ink, and a separate one for the
+// water it drifts in. The water only ever takes a faint cast of its hue, dark
+// in a dark scheme and pale in a light one, so any pairing still reads as ink
+// on a plain ground.
+const baseHue = hash2(5, 0) * 360;
+const waterHue = hash2(6, 0) * 360;
+const waterSaturation = 18 + hash2(7, 0) * 24;
+
 const DROPS = 140; // ink sources alive at once
 const PER_DROP = 22; // filaments each one sends out
 
@@ -60,11 +52,63 @@ let w = 0;
 let h = 0;
 let dpr = 1;
 let dark = true;
-let baseHue = 140;
 let filaments = [];
 let frame = null;
 let time = 0;
 let spawned = 0;
+
+// Where the ink piles up. The currents barely move, so filaments funnel onto
+// the same few streamlines and comb over them again and again; left alone
+// those ribbons go solid and, being additive, wash out to white. A single
+// global erase rate cannot see that — the screen as a whole stays moderate
+// while those bands burn out. So the canvas is read back, coarsely, and used
+// two ways: filaments stop feeding a cell that is already full, and the map
+// itself erases in proportion to what is there.
+const METER_W = 64;
+const METER_H = 36;
+const METER_INTERVAL = 12; // frames between readbacks
+const CROWD_CAP = 0.42; // cell density at which a filament lays down nothing
+const LOCAL_ERASE = 0.006; // per frame, scaled by that cell's own density
+const FLAT_ERASE = 0.0012; // the old even nibble, so lone filaments still fade
+
+const meter = document.createElement("canvas");
+meter.width = METER_W;
+meter.height = METER_H;
+const meterCtx = meter.getContext("2d", { willReadFrequently: true });
+let density = null;
+let sinceMeter = METER_INTERVAL;
+
+// Downscaling to a thumbnail and reading that back is cheap; reading the full
+// canvas would not be. Alpha alone says how much ink is down, in either colour
+// scheme, since the ink is laid on glass with the haze behind it.
+function sampleDensity() {
+  if (!w || !h) return;
+  meterCtx.clearRect(0, 0, METER_W, METER_H);
+  // Blurred at thumbnail scale — a pixel here is some thirty on screen — so
+  // neighbouring cells bleed into each other and the map has no seams.
+  meterCtx.filter = "blur(1px)";
+  meterCtx.drawImage(canvas, 0, 0, METER_W, METER_H);
+  meterCtx.filter = "none";
+  density = meterCtx.getImageData(0, 0, METER_W, METER_H).data;
+}
+
+// Read between the cells, not out of one: a nearest-cell lookup makes the cap
+// fall along cell edges, which reads as rectangles cut out of the ink.
+function crowding(x, y) {
+  if (!density) return 0;
+  const fx = Math.min(METER_W - 1, Math.max(0, (x / w) * METER_W - 0.5));
+  const fy = Math.min(METER_H - 1, Math.max(0, (y / h) * METER_H - 0.5));
+  const ix = fx | 0;
+  const iy = fy | 0;
+  const tx = fx - ix;
+  const ty = fy - iy;
+  const jx = Math.min(METER_W - 1, ix + 1);
+  const jy = Math.min(METER_H - 1, iy + 1);
+  const at = (cx, cy) => density[(cy * METER_W + cx) * 4 + 3];
+  const top = at(ix, iy) * (1 - tx) + at(jx, iy) * tx;
+  const bottom = at(ix, jy) * (1 - tx) + at(jx, jy) * tx;
+  return (top * (1 - ty) + bottom * ty) / 255;
+}
 
 // A still underlay, drawn once: the same currents at a whisper, so the empty
 // parts of the screen are never actually empty.
@@ -158,13 +202,26 @@ function drop() {
 }
 
 function advance() {
-  // A barely-there erase keeps the canvas from silting up over long sessions;
-  // at this rate a filament stays legible for well over a minute. It subtracts
-  // alpha instead of laying down background, so the haze shows through.
+  if (sinceMeter++ >= METER_INTERVAL) {
+    sinceMeter = 0;
+    sampleDensity();
+  }
+
+  // Two erases, both subtracting alpha rather than laying down background, so
+  // the haze keeps showing through. The first is the old even nibble: at this
+  // rate a lone filament stays legible for well over a minute. The second is
+  // the density map painted back over the canvas, which takes away in
+  // proportion to what each part of the glass is already holding — heavy on a
+  // silted ribbon, next to nothing on open water. Upscaling the thumbnail
+  // blurs it, so it lifts a region rather than cutting at the lines in it.
   ctx.globalCompositeOperation = "destination-out";
-  ctx.globalAlpha = 0.0012;
+  ctx.globalAlpha = FLAT_ERASE;
   ctx.fillStyle = "#000";
   ctx.fillRect(0, 0, w, h);
+  if (density) {
+    ctx.globalAlpha = LOCAL_ERASE;
+    ctx.drawImage(meter, 0, 0, w, h);
+  }
 
   ctx.globalCompositeOperation = dark ? "lighter" : "multiply";
   ctx.lineCap = "round";
@@ -200,10 +257,18 @@ function advance() {
     const taper = Math.min(1, (1 - life) * 3) * Math.min(1, f.age / 25);
     const falloff = Math.min(1, Math.hypot(f.x - cx, f.y - cy) / reach);
 
+    // The one that matters: ink thins out as the water around it fills, and
+    // stops at the cap. The filament still travels — it just stops thickening
+    // a ribbon that is already solid. Eased at both ends so the ink fades out
+    // of a crowd rather than stopping on a line.
+    const t = Math.min(1, crowding(f.x, f.y) / CROWD_CAP);
+    const room = 1 - t * t * (3 - 2 * t);
+    if (room <= 0) continue;
+
     ctx.strokeStyle = f.ink;
     ctx.lineWidth = f.width * (0.35 + 0.65 * taper);
     ctx.globalAlpha =
-      (dark ? 0.019 : 0.017) * (0.14 + 0.86 * falloff) * taper * f.weight;
+      (dark ? 0.019 : 0.017) * (0.14 + 0.86 * falloff) * taper * f.weight * room;
     ctx.beginPath();
     ctx.moveTo(f.px, f.py);
     ctx.lineTo(f.x, f.y);
@@ -239,9 +304,8 @@ function resize() {
   canvas.height = haze.height = h * dpr;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-  const style = getComputedStyle(document.documentElement);
   dark = matchMedia("(prefers-color-scheme: dark)").matches;
-  baseHue = hueOf(style.getPropertyValue("--accent").trim());
+  document.body.style.background = `hsl(${waterHue} ${waterSaturation}% ${dark ? 5 : 95}%)`;
 
   ctx.globalCompositeOperation = "source-over";
   ctx.globalAlpha = 1;
@@ -251,7 +315,10 @@ function resize() {
   filaments = [];
   spawned = 0;
   stop();
-  // Open with the water already threaded, then keep growing from there.
+  // Open with the water already threaded, then keep growing from there. The
+  // priming frames meter themselves, so the opening cannot silt up either.
+  density = null;
+  sinceMeter = METER_INTERVAL;
   for (let i = 0; i < 170; i++) advance();
   if (!reduced.matches) start();
 }

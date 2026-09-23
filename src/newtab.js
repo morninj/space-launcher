@@ -6,12 +6,22 @@ const DEFAULT_LINKS = [
 
 const list = document.getElementById("links");
 const search = document.getElementById("search");
+
+// Chrome focuses the omnibox on its new tab page and ignores focus() from an
+// override, so this copy of the page hands itself to the service worker: it
+// opens an ordinary tab on the same page in this slot and closes this one.
+// The ?focused mark keeps that copy from asking again — and, because it is no
+// longer the new tab URL exactly, keeps Chrome's focus out of the omnibox.
+if (!location.search) chrome.runtime.sendMessage("refocus");
 let links = DEFAULT_LINKS;
 let rows = []; // flattened visible rows; `selected` indexes into this
 let selected = 0;
 let editing = null; // {link} to edit, or {parent, index} to insert
 let confirming = null; // id of the link awaiting delete confirmation
 let query = ""; // search box contents, lowercased
+// Nothing is chosen yet: the search box has focus and the box is empty, so no
+// row is drawn as the active one. A search, or a step into the list, ends it.
+let idle = true;
 
 // Storage can be missing (extension not reloaded since the "storage" permission
 // was added). Fall back to the defaults rather than leaving the page blank.
@@ -20,47 +30,82 @@ async function load() {
     const stored = await chrome.storage.sync.get({ links: DEFAULT_LINKS });
     links = stored.links;
   } catch (error) {
-    console.error("[homepage-links] could not read storage", error);
+    console.error("[launcher] could not read storage", error);
   }
   collapseAll();
   render();
 }
 
+// Every folder in the tree, at whatever depth, parents before children.
+function eachFolder(visit, siblings = links) {
+  siblings.forEach((link) => {
+    const children = childrenOf(link);
+    if (!children.length) return;
+    visit(link);
+    eachFolder(visit, children);
+  });
+}
+
 // Existing data may predate the rule that a folder is a heading.
 function normalize() {
-  links.forEach((link) => {
-    if (childrenOf(link).length) link.url = "";
+  eachFolder((link) => {
+    link.url = "";
   });
 }
 
 function collapseAll() {
-  links.forEach((link) => {
-    if (childrenOf(link).length) link.collapsed = true;
+  eachFolder((link) => {
+    link.collapsed = true;
   });
 }
 
-// Remembers what we wrote, so our own change events can be ignored below.
-let lastWrite = null;
+// Every save echoes back through the listener below as a change event. More
+// than one can be in flight at a time — holding the reorder keys, or adding a
+// link while the last write is still going — so each is remembered until its
+// own echo returns, not just the latest. The timer is for the echo that never
+// comes, when a write lands on an identical value.
+const pending = new Set();
 
 async function save() {
+  const snapshot = JSON.stringify(links);
+  pending.add(snapshot);
+  setTimeout(() => pending.delete(snapshot), 5000);
   try {
-    lastWrite = JSON.stringify(links);
     await chrome.storage.sync.set({ links });
   } catch (error) {
-    console.error("[homepage-links] could not write storage", error);
+    console.error("[launcher] could not write storage", error);
   }
+}
+
+// Which folders are open, by id.
+function folds() {
+  const open = new Set();
+  eachFolder((link) => {
+    if (!link.collapsed) open.add(link.id);
+  });
+  return open;
+}
+
+// Folders this page had open stay open; ones it has not seen arrive folded.
+function restoreFolds(open) {
+  eachFolder((link) => {
+    if (open.has(link.id)) delete link.collapsed;
+    else link.collapsed = true;
+  });
 }
 
 // Edits made on another computer (or in another open tab) arrive here. Skip the
 // re-render mid-edit so the form under the cursor does not vanish.
 chrome.storage?.onChanged.addListener((changes, area) => {
   if (area !== "sync" || !changes.links || editing !== null) return;
-  // Our own save echoes back here; re-collapsing on it would fold the folder
-  // you just added to.
-  if (JSON.stringify(changes.links.newValue) === lastWrite) return;
+  // Our own save coming back around.
+  if (pending.delete(JSON.stringify(changes.links.newValue))) return;
+  // Someone else's edit, then. It carries their fold state, which is theirs,
+  // not ours: what is open on this screen stays open.
+  const open = folds();
   links = changes.links.newValue ?? DEFAULT_LINKS;
   normalize();
-  collapseAll();
+  restoreFolds(open);
   render();
 });
 
@@ -72,58 +117,92 @@ function normalizeUrl(value) {
   return /^[a-z][a-z0-9+.-]*:\/\//i.test(url) ? url : `https://${url}`;
 }
 
+// What's in the search box, if it reads as an address to go to rather than a
+// label to look for. A scheme settles it outright; a bare "example.com/path"
+// counts only when no label matched, so a search for "node.js" still finds it.
+function typedUrl() {
+  const text = search.value.trim();
+  if (/^[a-z][a-z0-9+.-]*:\/\/\S+$/i.test(text)) return text;
+  if (!rows.length && /^[^\s/]+\.[a-z]{2,}(?::\d+)?(\/\S*)?$/i.test(text)) {
+    return normalizeUrl(text);
+  }
+  return null;
+}
+
+// A letter after the c picks the model, and one after that the effort. Without
+// them, whatever claude.ai is already set to stands. Thinking is turned on
+// either way — that is not a choice this makes, it is one it insists on.
+const MODELS = {
+  f: "Fable",
+  o: "Opus",
+  s: "Sonnet",
+  h: "Haiku",
+};
+
+// Keyed by what the menu calls them, since that is what has to be clicked.
+const EFFORTS = {
+  l: { id: "low", label: "Low" },
+  m: { id: "medium", label: "Medium" },
+  h: { id: "high", label: "High" },
+  e: { id: "xhigh", label: "Extra" },
+  x: { id: "max", label: "Max" },
+};
+
+// "c something to ask" in the search box is Claude mode: the list stands aside
+// and enter carries the prompt over to a new chat. The space is what arms it,
+// so a lone "c" is still a search — and the mode announces itself the moment
+// the space is typed, before there is any prompt to show.
+function claudeAsk() {
+  const m = search.value.match(/^c([fosh])?([lmhex])?\s([\s\S]*)$/i);
+  if (!m) return null;
+  // Position settles the letters that mean two things: the first is a model if
+  // it can be one, so "ch" is Haiku and "chh" is Haiku at high effort.
+  const model = m[1] ? MODELS[m[1].toLowerCase()] : null;
+  const effort = m[2] ? EFFORTS[m[2].toLowerCase()] : null;
+  return { prompt: m[3].trim(), model, effort };
+}
+
 function childrenOf(link) {
   return link.children ?? [];
 }
 
-// Parents are always listed; their children only while expanded. Nesting stops
-// at one level, so a row is either a parent or a child of one.
+// Headings are worth finding too: a folder's name is often the only place a
+// word like "launch" is written down.
 function matches(link) {
-  return (
-    link.url &&
-    (link.title.toLowerCase().includes(query) ||
-      link.url.toLowerCase().includes(query))
-  );
+  return link.title.toLowerCase().includes(query);
 }
 
+// Results come out flat: the tree is a way to keep things, not a way to read
+// them back, and a hit is worth the same however deep it sat.
 function searchRows() {
   const out = [];
-  links.forEach((link, index) => {
-    if (matches(link)) {
-      out.push({ link, parent: null, siblings: links, index, depth: 0 });
-    }
-    childrenOf(link).forEach((child, childIndex) => {
-      if (matches(child)) {
-        out.push({
-          link: child,
-          parent: link,
-          siblings: link.children,
-          index: childIndex,
-          depth: 0,
-        });
-      }
+  const walk = (siblings, parent) => {
+    siblings.forEach((link, index) => {
+      if (matches(link)) out.push({ link, parent, siblings, index, depth: 0 });
+      walk(childrenOf(link), link);
     });
-  });
+  };
+  walk(links, null);
   return out;
 }
 
 function visibleRows() {
   if (query) return searchRows();
   const out = [];
-  links.forEach((link, index) => {
-    out.push({ link, parent: null, siblings: links, index, depth: 0 });
-    if (link.collapsed) return;
-    childrenOf(link).forEach((child, childIndex) => {
-      out.push({
-        link: child,
-        parent: link,
-        siblings: link.children,
-        index: childIndex,
-        depth: 1,
-      });
+  const walk = (siblings, parent, depth) => {
+    siblings.forEach((link, index) => {
+      out.push({ link, parent, siblings, index, depth });
+      if (!link.collapsed) walk(childrenOf(link), link, depth + 1);
     });
-  });
+  };
+  walk(links, null, 0);
   return out;
+}
+
+// A row's own children, their children, and so on — what a delete takes with
+// it, and how far past a folder its subtree reaches in the list.
+function descendants(link) {
+  return childrenOf(link).reduce((n, child) => n + 1 + descendants(child), 0);
 }
 
 function button(label, className, onClick) {
@@ -135,12 +214,36 @@ function button(label, className, onClick) {
   return el;
 }
 
+// One step per level, set here rather than as a class per depth: the tree can
+// run as deep as it likes.
+const STEP = 1.25; // rem
+
+function indent(el, depth) {
+  if (depth) el.style.marginLeft = `${depth * STEP}rem`;
+}
+
+// The numeral column and tree gutter that a link row opens with. A form or a
+// prompt standing in for a row gets the same two, so its text starts where the
+// title it replaces would have — measuring that offset in padding instead
+// means guessing at the width of the tree glyph.
+function leader(depth) {
+  const num = document.createElement("span");
+  num.className = "num";
+
+  const tree = document.createElement("span");
+  tree.className = "tree";
+  tree.textContent = depth ? "└" : "";
+  indent(tree, depth);
+
+  return [num, tree];
+}
+
 function linkRow(row, position) {
   const { link, depth } = row;
   const li = document.createElement("li");
   li.className = `depth-${depth}`;
   li.dataset.id = link.id;
-  if (position === selected) li.classList.add("selected");
+  if (position === selected && showSelection()) li.classList.add("selected");
 
   const num = document.createElement("span");
   num.className = "num";
@@ -150,6 +253,7 @@ function linkRow(row, position) {
   const tree = document.createElement("span");
   tree.className = "tree";
   tree.textContent = depth ? "└" : "";
+  indent(tree, depth);
 
   const twist = document.createElement("span");
   twist.className = "twist";
@@ -163,6 +267,7 @@ function linkRow(row, position) {
   if (link.url) {
     label = document.createElement("a");
     label.href = link.url;
+    label.draggable = false; // the row is what gets dragged, not the URL
   } else {
     label = document.createElement("span");
     label.classList.add("heading");
@@ -176,6 +281,9 @@ function linkRow(row, position) {
       event.preventDefault();
       open(link, event.shiftKey);
     });
+  } else if (query) {
+    // A heading in the results stands for its place in the list.
+    label.addEventListener("click", () => reveal(link));
   }
   label.addEventListener("focus", () => {
     if (position === selected) return;
@@ -198,12 +306,19 @@ function linkRow(row, position) {
   );
 
   li.append(num, tree, label, twist, actions);
+  // Search results are a flat view of a tree, so there is no order in them to
+  // rearrange; dragging is for the list as it is kept.
+  if (!query) draggable(li, row);
   return li;
 }
 
 function editRow(target) {
   const link = target.link ?? null;
-  const depth = link ? (rowFor(link)?.depth ?? 0) : target.parent ? 1 : 0;
+  const depth = link
+    ? (rowFor(link)?.depth ?? 0)
+    : target.parent
+      ? (rowFor(target.parent)?.depth ?? 0) + 1
+      : 0;
   const li = document.createElement("li");
   li.className = `editing depth-${depth}`;
 
@@ -266,7 +381,7 @@ function editRow(target) {
     focusSelected();
   });
 
-  li.append(form);
+  li.append(...leader(depth), form);
   queueMicrotask(() => title.focus());
   return li;
 }
@@ -275,9 +390,9 @@ function confirmRow(row, position) {
   const { link, depth } = row;
   const li = document.createElement("li");
   li.className = `confirm depth-${depth}`;
-  if (position === selected) li.classList.add("selected");
+  if (position === selected && showSelection()) li.classList.add("selected");
 
-  const count = childrenOf(link).length;
+  const count = descendants(link);
   const text = document.createElement("span");
   text.className = "prompt";
   text.textContent = count
@@ -286,6 +401,7 @@ function confirmRow(row, position) {
 
   const yes = button("Delete", "icon", () => remove(link.id));
   li.append(
+    ...leader(depth),
     text,
     yes,
     button("Cancel", "icon", () => {
@@ -301,13 +417,96 @@ function confirmRow(row, position) {
 function addRow() {
   const li = document.createElement("li");
   li.className = "add";
-  if (selected === rows.length) li.classList.add("selected");
+  if (selected === rows.length && showSelection()) li.classList.add("selected");
   li.append(
     button("+ Add", "add-button", () => {
       editing = { parent: null, index: links.length };
       render();
     }),
   );
+
+  // Past the end of everything: a drop here sends the link to the bottom of
+  // the top level, which is otherwise hard to aim at.
+  const last = { link: null, siblings: links, index: links.length, depth: 0 };
+  li.addEventListener("dragover", (event) => {
+    if (!dragging) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    clearMarkers();
+    li.classList.add("drop-before");
+  });
+  li.addEventListener("drop", (event) => {
+    if (!dragging) return;
+    event.preventDefault();
+    const link = dragging;
+    dragging = null;
+    clearMarkers();
+    relocate(link, last, "before");
+  });
+
+  return li;
+}
+
+// A row only looks chosen once something has chosen it.
+function showSelection() {
+  return Boolean(query) || !idle;
+}
+
+// The prefix without its space is someone halfway to a command, so the letters
+// explain themselves. The search underneath carries on regardless — this only
+// ever sits below it as a reminder.
+const HELP = [
+  ["c ␣", "ask Claude, then the prompt"],
+  ["cf co cs ch", "fable · opus · sonnet · haiku"],
+  ["+l +m +h +e +x", "low · medium · high · extra · max"],
+];
+
+function halfCommand() {
+  return /^c[fosh]?[lmhex]?$/i.test(search.value.trim());
+}
+
+function helpRow() {
+  const li = document.createElement("li");
+  li.className = "help";
+  HELP.forEach(([keys, what]) => {
+    const line = document.createElement("div");
+    const k = document.createElement("span");
+    k.className = "keys";
+    k.textContent = keys;
+    line.append(k, document.createTextNode(what));
+    li.append(line);
+  });
+  return li;
+}
+
+// One row, in place of the list: what will be asked, and of whom.
+function askRow({ prompt, model, effort }) {
+  const li = document.createElement("li");
+  li.className = "ask selected";
+
+  const mark = document.createElement("span");
+  mark.className = "num";
+  mark.textContent = "✳";
+
+  const label = document.createElement("span");
+  label.className = "label";
+  label.textContent = prompt || "Ask Claude…";
+  if (!prompt) label.classList.add("hint");
+
+  const where = document.createElement("span");
+  where.className = "actions";
+  where.style.visibility = "visible";
+  if (askTrouble) {
+    where.textContent = askTrouble;
+    where.classList.add("trouble");
+  } else {
+    const who = [model, effort?.label].filter(Boolean).join(" · ");
+    where.textContent = prompt
+      ? `${who || "New chat"} ↵`
+      : `type a prompt${who ? ` for ${who}` : ""}`;
+  }
+
+  li.append(mark, label, where);
   return li;
 }
 
@@ -327,6 +526,105 @@ async function remove(id) {
   await save();
   render();
   focusSelected();
+}
+
+// Dragging. The row being carried, and the marker showing where it would land,
+// are kept on the DOM directly: a render mid-drag would replace the element
+// under the cursor and the browser would lose the drag with it.
+let dragging = null;
+
+function clearMarkers() {
+  list
+    .querySelectorAll(".drop-before, .drop-after, .drop-into")
+    .forEach((el) => el.classList.remove("drop-before", "drop-after", "drop-into"));
+}
+
+// A heading takes children; a link is a place to land beside, not inside.
+function accepts(link) {
+  return !link.url;
+}
+
+function contains(folder, link) {
+  return childrenOf(folder).some((child) => child === link || contains(child, link));
+}
+
+// Where the pointer sits in the row: its ends mean "beside", its middle means
+// "inside", and only a heading offers a middle.
+function dropPlan(row, li, event) {
+  const rect = li.getBoundingClientRect();
+  const at = (event.clientY - rect.top) / rect.height;
+  if (accepts(row.link) && at > 0.28 && at < 0.72) return "into";
+  return at < 0.5 ? "before" : "after";
+}
+
+// A folder cannot be dropped inside itself, or anywhere under itself.
+function canDrop(link, row, plan) {
+  if (row.link === link) return false;
+  if (contains(link, row.link)) return false;
+  return plan !== "into" || accepts(row.link);
+}
+
+async function relocate(link, row, plan) {
+  const from = rowFor(link);
+  if (!from) return;
+  const into = plan === "into";
+  const siblings = into ? (row.link.children ??= []) : row.siblings;
+  let index = into ? siblings.length : row.index + (plan === "after" ? 1 : 0);
+
+  from.siblings.splice(from.index, 1);
+  // Lifting it out of the list it is going back into shifts what follows.
+  if (siblings === from.siblings && from.index < index) index--;
+  siblings.splice(index, 0, link);
+  if (into) {
+    row.link.url = ""; // it holds links now, so it is a heading
+    delete row.link.collapsed;
+  }
+
+  render();
+  selectById(link.id);
+  render();
+  focusSelected();
+  await save();
+}
+
+// Rows carry their own drag handling; the marker classes are set here rather
+// than through render() for the reason given above.
+function draggable(li, row) {
+  li.draggable = true;
+
+  li.addEventListener("dragstart", (event) => {
+    dragging = row.link;
+    li.classList.add("dragging");
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", row.link.title);
+  });
+
+  li.addEventListener("dragend", () => {
+    dragging = null;
+    li.classList.remove("dragging");
+    clearMarkers();
+  });
+
+  li.addEventListener("dragover", (event) => {
+    if (!dragging) return;
+    const plan = dropPlan(row, li, event);
+    if (!canDrop(dragging, row, plan)) return;
+    event.preventDefault(); // this is the sign that a drop is allowed here
+    event.dataTransfer.dropEffect = "move";
+    clearMarkers();
+    li.classList.add(`drop-${plan}`);
+  });
+
+  li.addEventListener("drop", (event) => {
+    if (!dragging) return;
+    const plan = dropPlan(row, li, event);
+    if (!canDrop(dragging, row, plan)) return;
+    event.preventDefault();
+    const link = dragging;
+    dragging = null;
+    clearMarkers();
+    relocate(link, row, plan);
+  });
 }
 
 // Reordering stays within a row's own siblings: a child moves among its
@@ -351,7 +649,101 @@ function setCollapsed(link, collapsed) {
   focusSelected();
 }
 
+// Opening a folder by number is a step into it, so the first child becomes the
+// selection; the same key on an open folder just shuts it again.
+// The folders between the top level and this link, outermost first, or null if
+// the link is not in the tree at all.
+function ancestorsOf(link, siblings = links, trail = []) {
+  for (const candidate of siblings) {
+    if (candidate === link) return trail;
+    const found = ancestorsOf(link, childrenOf(candidate), [...trail, candidate]);
+    if (found) return found;
+  }
+  return null;
+}
+
+// A heading found by searching is a place, not a thing to open: put the list
+// back with the way down to it unfolded, and the heading itself selected and
+// open, so what it holds is on screen.
+function reveal(link) {
+  search.value = "";
+  query = "";
+  collapseAll();
+  (ancestorsOf(link) ?? []).forEach((folder) => delete folder.collapsed);
+  if (childrenOf(link).length) delete link.collapsed;
+  idle = false;
+  render(); // the row exists once the folds are set, so now it can be found
+  selected = Math.max(0, rows.findIndex((row) => row.link === link));
+  render();
+  focusSelected();
+}
+
+// Hand the prompt to the worker, which opens the chat and holds the text until
+// claude.ai has loaded enough to take it.
+// Whatever goes wrong goes on the row, where it will actually be read.
+let askTrouble = null;
+
+function trouble(what) {
+  askTrouble = what;
+  render();
+}
+
+async function askClaude({ prompt, model, effort }) {
+  if (!prompt) return;
+  // Reloading the extension leaves any page it had already opened holding a
+  // dead runtime: the list still draws, but nothing it asks for arrives.
+  if (!chrome.runtime?.id) {
+    trouble("reload this tab — the extension was updated");
+    return;
+  }
+  try {
+    const answer = await chrome.runtime.sendMessage({
+      type: "ask-claude",
+      prompt,
+      model,
+      effort,
+    });
+    if (answer?.error) {
+      trouble(answer.error);
+      return;
+    }
+  } catch (error) {
+    trouble(String(error?.message ?? error));
+    return;
+  }
+  askTrouble = null;
+  reset(); // the box is emptied for whatever comes next
+}
+
+// Enter on a result: links open, headings are revealed in the list.
+function activate(link, newTab) {
+  if (link.url) open(link, newTab);
+  else reveal(link);
+}
+
+function enterFolder(link) {
+  if (!link.collapsed) {
+    setCollapsed(link, true);
+    return;
+  }
+  delete link.collapsed;
+  render(); // the children are rows now, so there is a first one to point at
+  const first = rows.findIndex((row) => row.parent === link);
+  if (first !== -1) selected = first;
+  render();
+  focusSelected();
+}
+
 function render() {
+  const ask = claudeAsk();
+  if (ask) {
+    // Nothing in the list is reachable from here, so nothing in it is drawn.
+    rows = [];
+    selected = 0;
+    list.replaceChildren(askRow(ask));
+    return;
+  }
+
   rows = visibleRows();
   rows.forEach((row, position) => {
     row.number = position + 1;
@@ -367,6 +759,7 @@ function render() {
 
   if (editing && !editing.link) items.splice(insertPosition(), 0, editRow(editing));
   if (!query) items.push(addRow());
+  if (halfCommand()) items.push(helpRow());
   list.replaceChildren(...items);
   list.querySelector(".selected")?.scrollIntoView({ block: "nearest" });
 }
@@ -377,10 +770,12 @@ function insertPosition() {
   const at = rows.findIndex((row) => row.parent === parent && row.index === index);
   if (at !== -1) return at;
   if (parent === null) return rows.length;
-  const lastChild = rows.map((row) => row.parent === parent).lastIndexOf(true);
-  if (lastChild !== -1) return lastChild + 1;
   const parentAt = rows.findIndex((row) => row.link === parent);
-  return parentAt === -1 ? rows.length : parentAt + 1;
+  if (parentAt === -1) return rows.length;
+  // Past the parent's whole subtree, not just its first generation.
+  let end = parentAt + 1;
+  while (end < rows.length && rows[end].depth > rows[parentAt].depth) end++;
+  return end;
 }
 
 // Escape anywhere: clear the search, fold everything, back to the box.
@@ -389,6 +784,7 @@ function reset() {
   query = "";
   collapseAll();
   selected = 0;
+  idle = true;
   render();
   search.focus();
 }
@@ -401,6 +797,10 @@ function move(delta) {
 
 function focusSelected() {
   if (query) return; // results are steered from the search box
+  if (idle) {
+    idle = false;
+    render(); // the row has to be marked before there is anything to focus
+  }
   list
     .querySelector(".selected .label, .selected .add-button")
     ?.focus({ preventScroll: true });
@@ -420,8 +820,12 @@ function launch(link) {
 function open(link, newTab) {
   const delay = launch(link);
   if (newTab) {
-    window.open(link.url, "_blank");
-    // The page stays put, so wind the animation back down.
+    // Through the extension rather than window.open, which the popup blocker
+    // is free to refuse and which gives us no say over where the tab lands.
+    if (chrome.tabs) chrome.tabs.create({ url: link.url, active: true });
+    else window.open(link.url, "_blank");
+    // This page is left behind rather than navigated away from, so wind the
+    // animation back down for whenever it is looked at again.
     setTimeout(() => {
       list.classList.remove("launching");
       list.querySelector(".launching")?.classList.remove("launching");
@@ -431,23 +835,52 @@ function open(link, newTab) {
   }
 }
 
+list.addEventListener("dragleave", (event) => {
+  if (!list.contains(event.relatedTarget)) clearMarkers();
+});
+
+search.addEventListener("focus", () => {
+  if (idle || query) return;
+  idle = true;
+  render();
+});
+
+// A pasted address is somewhere to go, not something to search for — but only
+// when it is all the box holds, not a piece spliced into a query.
+let pasted = null;
+search.addEventListener("paste", (event) => {
+  pasted = event.clipboardData.getData("text").trim();
+});
+
 search.addEventListener("input", () => {
   query = search.value.trim().toLowerCase();
   selected = 0;
+  askTrouble = null; // a fresh keystroke is a fresh attempt
+  idle = !query; // an empty box has chosen nothing
   render();
+  const wasPaste = pasted !== null && search.value.trim() === pasted;
+  pasted = null;
+  const url = wasPaste && typedUrl();
+  if (url) open({ id: "", url }, false);
 });
 
 document.addEventListener("keydown", (event) => {
   // In the search box: arrows walk the results, Enter opens the current one.
   if (event.target === search) {
+    // Claude mode owns enter while it is on; the rest of the box still works.
+    const ask = claudeAsk();
+    if (ask && event.key === "Enter") {
+      event.preventDefault();
+      askClaude(ask);
+      return;
+    }
     // A digit on an empty box is a jump, not the start of a query.
     if (!search.value && /^[1-9]$/.test(event.key)) {
       const target = rows.find((r) => r.number === Number(event.key));
       if (target) {
         event.preventDefault();
         if (target.link.url) open(target.link, event.shiftKey);
-        else if (childrenOf(target.link).length)
-          setCollapsed(target.link, !target.link.collapsed);
+        else if (childrenOf(target.link).length) enterFolder(target.link);
         return;
       }
     }
@@ -458,9 +891,12 @@ document.addEventListener("keydown", (event) => {
     } else if (event.key === "ArrowUp" && query) {
       event.preventDefault();
       move(-1); // walks the results; focus stays in the box
-    } else if (event.key === "Enter" && rows[selected]) {
+    } else if (event.key === "Enter" && typedUrl()) {
       event.preventDefault();
-      open(rows[selected].link, event.shiftKey);
+      open({ id: "", url: typedUrl() }, event.shiftKey);
+    } else if (event.key === "Enter" && rows[selected] && showSelection()) {
+      event.preventDefault();
+      activate(rows[selected].link, event.shiftKey);
     } else if (event.key === "Escape") {
       event.preventDefault();
       reset();
@@ -518,10 +954,10 @@ document.addEventListener("keydown", (event) => {
   } else if (event.key === "h" || event.key === "ArrowLeft") {
     event.preventDefault();
     if (!row) return;
-    // Collapse an open parent; from a child, step up to the parent.
-    if (row.depth === 0 && childrenOf(row.link).length && !row.link.collapsed) {
+    // Collapse an open folder; otherwise climb to the one holding this row.
+    if (childrenOf(row.link).length && !row.link.collapsed) {
       setCollapsed(row.link, true);
-    } else if (row.depth === 1) {
+    } else if (row.parent) {
       selected = rows.findIndex((r) => r.link === row.parent);
       render();
       focusSelected();
@@ -547,8 +983,7 @@ document.addEventListener("keydown", (event) => {
     if (!target) return;
     event.preventDefault();
     if (target.link.url) open(target.link, false);
-    else if (childrenOf(target.link).length)
-      setCollapsed(target.link, !target.link.collapsed);
+    else if (childrenOf(target.link).length) enterFolder(target.link);
   } else if (event.key === "a") {
     event.preventDefault();
     // A sibling of the selected row, directly beneath it.
@@ -558,11 +993,12 @@ document.addEventListener("keydown", (event) => {
     render();
   } else if (event.key === "A" && row) {
     event.preventDefault();
-    // A child of the selected row; from a child, a sibling of it instead.
-    editing =
-      row.depth === 0
-        ? { parent: row.link, index: childrenOf(row.link).length }
-        : { parent: row.parent, index: row.index + 1 };
+    // A child of the selected row, at the end of whatever it already holds.
+    editing = { parent: row.link, index: childrenOf(row.link).length };
+    render();
+  } else if (event.key === "e" && row) {
+    event.preventDefault();
+    editing = { link: row.link };
     render();
   } else if (event.key === "d" && row) {
     event.preventDefault();
@@ -577,7 +1013,7 @@ document.addEventListener("keydown", (event) => {
 normalize();
 collapseAll();
 render();
-// Works because background.js re-navigates new tabs here as an ordinary URL;
-// Chrome ignores focus() on a new tab page override.
+// Takes hold in the replacement tab; in the tab Chrome opened it does nothing,
+// because the focus the omnibox has there is not ours to take.
 search.focus();
 load();
