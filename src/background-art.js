@@ -287,6 +287,7 @@ function step() {
 }
 
 function start() {
+  if (!w) return; // nothing has been sized yet, so there is nothing to paint
   if (frame) cancelAnimationFrame(frame);
   frame = requestAnimationFrame(step);
 }
@@ -294,6 +295,26 @@ function start() {
 function stop() {
   if (frame) cancelAnimationFrame(frame);
   frame = null;
+}
+
+// Priming is hundreds of frames of ink; done in one go it holds up the first
+// paint, and the list is what someone is actually waiting for. So it runs in
+// small batches across the first few frames instead, with a token so a resize
+// mid-batch abandons the old one rather than racing it.
+let generation = 0;
+
+function prime(token, frames) {
+  if (token !== generation) return;
+  const batch = Math.min(20, frames);
+  for (let i = 0; i < batch; i++) advance();
+  const left = frames - batch;
+  if (left > 0) {
+    // Held in `frame` like any other, so stopping the art stops this too.
+    frame = requestAnimationFrame(() => prime(token, left));
+  } else {
+    frame = null;
+    if (!reduced.matches) start();
+  }
 }
 
 function resize() {
@@ -311,20 +332,30 @@ function resize() {
   ctx.globalAlpha = 1;
   ctx.clearRect(0, 0, w, h);
 
-  drawHaze();
   filaments = [];
   spawned = 0;
   stop();
-  // Open with the water already threaded, then keep growing from there. The
-  // priming frames meter themselves, so the opening cannot silt up either.
   density = null;
   sinceMeter = METER_INTERVAL;
-  for (let i = 0; i < 170; i++) advance();
-  if (!reduced.matches) start();
+
+  // The haze is one heavy pass and the priming is many; neither is worth
+  // holding the list behind, so both wait for the frame after it is up.
+  const token = ++generation;
+  requestAnimationFrame(() => {
+    if (token !== generation) return;
+    drawHaze();
+    // Open with the water already threaded, then keep growing from there. The
+    // priming frames meter themselves, so the opening cannot silt up either.
+    prime(token, 170);
+  });
 }
 
-resize();
-window.addEventListener("resize", resize);
+// Nothing is painted into the copy Chrome is about to throw away.
+unlessReplaced(() => {
+  resize();
+  window.addEventListener("resize", resize);
+});
+
 // Don't paint into a tab nobody is looking at.
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) stop();

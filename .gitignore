@@ -1,2 +1,5 @@
 backups/
 .DS_Store
+src/webb/
+dist/
+__pycache__/

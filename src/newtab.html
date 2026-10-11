@@ -3,6 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <title>New Tab</title>
+    <script src="refocus.js"></script>
     <style>
       :root {
         color-scheme: light dark;
@@ -62,6 +63,69 @@
       }
       #sky {
         z-index: -1;
+      }
+      /* The Webb photograph, when there is one (webb.js). It fades up once
+         decoded rather than painting in strips. */
+      #photo {
+        position: fixed;
+        inset: 0;
+        z-index: -3;
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        opacity: 0;
+        transition: opacity 400ms ease-out;
+      }
+      #photo.shown {
+        opacity: 1;
+      }
+      /* What the photo is, tucked into the corner. Always set light, since it
+         sits on the photo and not on the page, and quiet until pointed at. */
+      #caption {
+        position: fixed;
+        left: 0.75rem;
+        bottom: 0.75rem;
+        max-width: min(40rem, calc(100vw - 2.5rem));
+        padding: 0.5rem 0.75rem;
+        border-radius: 0.375rem;
+        background: rgba(0, 0, 0, 0.75);
+        backdrop-filter: blur(8px);
+        font-size: 0.8125rem;
+        line-height: 1.5;
+        color: #e8eaea;
+        text-shadow: 0 0 4px rgba(0, 0, 0, 0.6);
+      }
+      /* No photo, no plate. */
+      #caption:empty {
+        display: none;
+      }
+      /* Only the words fade back, so the plate behind them stays dark. */
+      #caption span {
+        display: block;
+        opacity: 0.7;
+        transition: opacity 200ms ease-out;
+      }
+      #caption:hover span {
+        opacity: 1;
+      }
+      #caption .title {
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+      #caption .credit {
+        opacity: 0.5;
+      }
+      #caption:hover .credit {
+        opacity: 0.75;
+      }
+      #caption a {
+        color: inherit;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        #photo,
+        #caption span {
+          transition: none;
+        }
       }
       /* The list sits on its own plate, lifted off the field behind it. */
       main {
@@ -172,6 +236,23 @@
         color: var(--accent);
         text-shadow: 0 0 12px var(--glow);
       }
+      /* Where a search result lives. Empty outside a search, and it collapses
+         to nothing then, so ordinary rows are untouched. */
+      .path {
+        flex: 0 1 auto;
+        min-width: 0;
+        padding-left: 0.25rem;
+        font-size: 0.8125rem;
+        color: var(--muted);
+        opacity: 0.75;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      li.selected .path {
+        opacity: 0.9;
+      }
+
       .actions {
         display: flex;
         margin-left: auto;
@@ -336,6 +417,7 @@
     </style>
   </head>
   <body>
+    <img id="photo" alt="" />
     <canvas id="haze" aria-hidden="true"></canvas>
     <canvas id="sky" aria-hidden="true"></canvas>
     <main>
@@ -348,7 +430,9 @@
       />
       <ul id="links"></ul>
     </main>
-    <script src="background-art.js"></script>
+    <footer id="caption"></footer>
+    <script src="webb/catalog.js"></script>
+    <script src="webb.js"></script>
     <script src="newtab.js"></script>
   </body>
 </html>

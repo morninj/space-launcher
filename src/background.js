@@ -19,11 +19,14 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (message?.type === "ask-claude") {
     // Answered, rather than left to fail quietly: the list waits for this and
     // says so on the row if it comes back as trouble.
-    handOff({
-      prompt: message.prompt,
-      model: message.model ?? null,
-      effort: message.effort ?? null,
-    }).then(respond);
+    handOff(
+      {
+        prompt: message.prompt,
+        model: message.model ?? null,
+        effort: message.effort ?? null,
+      },
+      sender.tab?.id,
+    ).then(respond);
     return true;
   }
   // From claude.ai, once it has loaded: was this tab opened carrying one?
@@ -33,29 +36,48 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   }
 });
 
+// Ctrl+L (the real Control key on a Mac, not ⌘): bring the launcher up in the
+// tab you are in, so the page you left stays one Back away. The URL carries
+// ?focused so the page doesn't take itself for a fresh new tab and ask to be
+// swapped out.
+chrome.commands.onCommand.addListener(async (command, tab) => {
+  if (command !== "go-home") return;
+  try {
+    if (tab?.id !== undefined) await chrome.tabs.update(tab.id, { url: REPLACEMENT });
+    else await chrome.tabs.create({ url: REPLACEMENT });
+  } catch (error) {
+    console.error("[space-launcher] could not go to the launcher", error);
+  }
+});
+
 // The prompt waits in session storage rather than a variable, because the
 // worker may be stopped and restarted between opening the tab and claude.ai
 // asking for it. Session storage is closed to content scripts, which is why
 // the page has to ask us rather than reading it.
 const CLAUDE = "https://claude.ai/new";
 
-async function handOff(request) {
+// This only prepares the hand-off; the list then walks its own tab to the URL
+// it gets back. Navigating from here would mean knowing which tab asked, and
+// going through the tabs API to move a page that can move itself.
+async function handOff(request, tabId) {
   try {
     // The request rides over in the fragment — never sent to any server, and
-    // read at document_start before the app can rewrite the URL. Session
-    // storage carries the same thing as a fallback, for a load that arrives
-    // without it.
+    // read at document_start before the app can rewrite the URL.
     const url = `${CLAUDE}#launcher=${encodeURIComponent(JSON.stringify(request))}`;
-    const tab = await chrome.tabs.create({ url, active: true });
-    await chrome.storage.session.set({ [`claude-${tab.id}`]: request });
+
+    // Session storage carries the same thing as a fallback, for a load that
+    // arrives without the fragment. Written before the page starts loading,
+    // and only when we know which tab to key it to.
+    if (tabId) await chrome.storage.session.set({ [`claude-${tabId}`]: request });
+
     console.log(
-      "[homepage-links] opened a chat for tab",
-      tab.id,
+      "[space-launcher] chat ready for tab",
+      tabId ?? "(unknown)",
       request.model ? `on ${request.model}` : "on whatever is selected",
     );
-    return { ok: true };
+    return { ok: true, url };
   } catch (error) {
-    console.error("[homepage-links] could not open Claude", error);
+    console.error("[space-launcher] could not prepare the chat", error);
     return { error: String(error?.message ?? error) };
   }
 }
@@ -70,13 +92,13 @@ async function claim(tabId) {
     await chrome.storage.session.remove(key);
     return stored[key];
   } catch (error) {
-    console.error("[homepage-links] could not read the pending prompt", error);
+    console.error("[space-launcher] could not read the pending prompt", error);
     return null;
   }
 }
 
 async function replace(tab) {
-  console.debug("[launcher] replacing new tab", tab.id);
+  console.debug("[space-launcher] replacing new tab", tab.id);
   try {
     await chrome.tabs.create({
       url: REPLACEMENT,
@@ -86,6 +108,6 @@ async function replace(tab) {
     });
     await chrome.tabs.remove(tab.id);
   } catch (error) {
-    console.error("[launcher] could not replace new tab", error);
+    console.error("[space-launcher] could not replace new tab", error);
   }
 }

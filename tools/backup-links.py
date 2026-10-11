@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Snapshot the Launcher's saved links into ./backups.
+"""Snapshot Space Launcher's saved links into ./backups.
 
 The extension cannot write here itself — chrome.downloads is confined to the
 downloads folder — so this reads Chrome's own storage for the extension and
@@ -134,7 +134,9 @@ def count(links):
 
 
 def main():
-    ext_id = extension_id()
+    # The store version has its own ID: pass it (from chrome://extensions) to
+    # back that one up instead of the unpacked copy.
+    ext_id = sys.argv[1] if len(sys.argv) > 1 else extension_id()
     stores = storage_dirs(ext_id)
     if not stores:
         print(f"no Chrome storage found for {ext_id}; nothing to back up")

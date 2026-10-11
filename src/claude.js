@@ -1,18 +1,21 @@
 // Runs on claude.ai. Asks the service worker whether this tab was opened to
 // carry a prompt over from the launcher; if it was, waits for the composer to
-// exist and types the prompt into it. Nothing is sent — the prompt is left in
-// the box, with the cursor after it, for you to read before pressing enter.
+// exist, sets the model and effort that were asked for, types the prompt in
+// and sends it. Anything that does not go to plan leaves the prompt sitting in
+// the box unsent, with what went wrong shown in the corner — a chat started on
+// the wrong model is worse than one that waits for a keystroke.
 
 const EDITOR = '[data-testid="chat-input"], [contenteditable="true"].ProseMirror';
 const PATIENCE = 20000; // claude.ai hydrates before the composer exists
 const MARK = "#launcher="; // how the request rides over on the URL
 const PICKER = '[data-testid="model-selector-dropdown"]';
+const SEND = '[data-testid="chat-input-send"]';
 const MENU_PATIENCE = 5000;
 
-// console.debug is hidden at Chrome's default log level, so this says its
-// piece out loud. The attribute is the same fact in a form a console can be
-// asked for after the event: document.documentElement.dataset.launcher.
-console.log("[homepage-links] claude.js running on", location.pathname);
+// Quiet on every claude.ai page: console.debug is hidden at Chrome's default
+// log level. The attribute is the same fact in a form a console can be asked
+// for after the event: document.documentElement.dataset.launcher.
+console.debug("[space-launcher] claude.js running on", location.pathname);
 document.documentElement.dataset.launcher = "ready";
 
 // The prompt arrives in the fragment, which never leaves the browser: no
@@ -113,41 +116,69 @@ function waitFor(selector, patience = PATIENCE) {
     const found = find(selector);
     if (found) return resolve(found);
 
-    const observer = new MutationObserver(() => {
-      const el = find(selector);
-      if (!el) return;
+    const done = (el) => {
       observer.disconnect();
+      clearInterval(poll);
       clearTimeout(timer);
       resolve(el);
-    });
+    };
+
+    const look = () => {
+      const el = find(selector);
+      if (el) done(el);
+    };
+
+    const observer = new MutationObserver(look);
     observer.observe(document.documentElement, { childList: true, subtree: true });
 
-    const timer = setTimeout(() => {
-      observer.disconnect();
-      resolve(null);
-    }, patience);
+    // A poll as well as the observer: an element can go from hidden to shown
+    // without the document changing at all — a transition, a class on an
+    // ancestor — and nothing would call the observer back for that.
+    const poll = setInterval(look, 60);
+    const timer = setTimeout(() => done(null), patience);
   });
 }
 
 // A real mouse sends pointer and mouse events before the click; menus built on
 // Base UI open on the first of those, so a bare .click() goes unnoticed.
 function press(el) {
+  const box = el.getBoundingClientRect();
+  const x = box.left + box.width / 2;
+  const y = box.top + box.height / 2;
+
+  // A real click lands on whatever is topmost at that point, which in these
+  // layouts is usually a span painted over the button. Handlers that read
+  // coordinates, or that watch the element the pointer is actually over, see
+  // nothing at all from an event aimed at the wrapper with no position on it.
+  const under = box.width ? document.elementFromPoint(x, y) : null;
+  const aim = under && el.contains(under) ? under : el;
+
   const opts = {
     bubbles: true,
     cancelable: true,
     composed: true,
     view: window,
+    detail: 1,
     button: 0,
     buttons: 1,
+    clientX: x,
+    clientY: y,
+    screenX: x,
+    screenY: y,
     pointerId: 1,
     pointerType: "mouse",
     isPrimary: true,
   };
-  el.dispatchEvent(new PointerEvent("pointerdown", opts));
-  el.dispatchEvent(new MouseEvent("mousedown", opts));
-  el.dispatchEvent(new PointerEvent("pointerup", { ...opts, buttons: 0 }));
-  el.dispatchEvent(new MouseEvent("mouseup", { ...opts, buttons: 0 }));
-  el.dispatchEvent(new MouseEvent("click", { ...opts, buttons: 0 }));
+  const up = { ...opts, buttons: 0 };
+
+  aim.dispatchEvent(new PointerEvent("pointerover", opts));
+  aim.dispatchEvent(new PointerEvent("pointerenter", { ...opts, bubbles: false }));
+  aim.dispatchEvent(new PointerEvent("pointermove", opts));
+  aim.dispatchEvent(new PointerEvent("pointerdown", opts));
+  aim.dispatchEvent(new MouseEvent("mousedown", opts));
+  aim.dispatchEvent(new PointerEvent("pointerup", up));
+  aim.dispatchEvent(new MouseEvent("mouseup", up));
+  aim.dispatchEvent(new MouseEvent("click", up));
 }
 
 // Menus open on hover as readily as on a press, and Base UI watches for the
@@ -176,7 +207,17 @@ function settle(test, ms = 2000) {
 // leftover does nothing and explains nothing, so nothing here is looked up
 // without this filter.
 function shown(el) {
-  return Boolean(el) && el.getClientRects().length > 0;
+  if (!el || el.getClientRects().length === 0) return false;
+  // A box in the layout is not the same as being on screen: these pages keep
+  // a second, hidden copy of the composer's buttons, and pressing that one
+  // does nothing at all. Both of those copies are marked inert and hidden,
+  // which is what this catches.
+  //
+  // Opacity is deliberately not part of it. These menus fade in, so a popup
+  // is transparent for the first frames of its life — judging it on opacity
+  // means calling a menu that is opening "not open".
+  if (el.closest("[inert]")) return false;
+  return el.checkVisibility ? el.checkVisibility({ visibilityProperty: true }) : true;
 }
 
 function find(selector) {
@@ -216,27 +257,51 @@ async function dismiss(safe) {
   await settle(() => !open(), 500);
 }
 
+const CODES = { Enter: 13, Escape: 27, ArrowRight: 39 };
+
 function key(el, name) {
-  el.dispatchEvent(
-    new KeyboardEvent("keydown", { key: name, bubbles: true, cancelable: true, composed: true }),
-  );
+  const code = CODES[name] ?? 0;
+  const opts = {
+    key: name,
+    code: name,
+    keyCode: code, // deprecated, and still what some editors read
+    which: code,
+    bubbles: true,
+    cancelable: true,
+    composed: true,
+  };
+  // Some handlers hang off keypress or keyup rather than keydown, and one
+  // extra event costs nothing.
+  el.dispatchEvent(new KeyboardEvent("keydown", opts));
+  if (name === "Enter") el.dispatchEvent(new KeyboardEvent("keypress", opts));
+  el.dispatchEvent(new KeyboardEvent("keyup", opts));
 }
 
 // One visit to the menu does all three. The order is what keeps it to one: the
 // effort levels and the thinking switch share a submenu and leave the parent
 // menu standing, while choosing a model closes the whole tree behind it — so
 // the model goes last, and its click doubles as the way out.
+// Two kinds of trouble: what the chat is answered with, which is worth
+// stopping for, and the thinking switch, which is not — a chat on the right
+// model at the right effort is the chat that was asked for either way.
 async function settings({ model, effort }, safe) {
+  const asked = Boolean(model || effort);
   const picker = document.querySelector(PICKER);
-  if (!picker) return ["no model picker on the page"];
+  if (!picker) return { blocking: asked ? ["no model picker on the page"] : [], noted: [] };
 
   const reads = (text) =>
     new RegExp(text, "i").test(picker.getAttribute("aria-label") ?? picker.textContent ?? "");
-  const problems = [];
+  const blocking = [];
+  const noted = [];
 
-  if (!(await openMenu(picker))) return ["the model menu would not open"];
+  if (!(await openMenu(picker))) {
+    const why = "the model menu would not open";
+    return asked ? { blocking: [why], noted: [] } : { blocking: [], noted: [why] };
+  }
 
-  problems.push(...(await effortAndThinking(effort)));
+  const inner = await effortAndThinking(effort);
+  blocking.push(...inner.blocking);
+  noted.push(...inner.noted);
 
   if (model && !reads(model)) {
     const wanted = `[role="menuitemradio"][data-model-id*="${model.toLowerCase()}" i]`;
@@ -247,7 +312,7 @@ async function settings({ model, effort }, safe) {
       const offered = [...document.querySelectorAll("[role=menuitemradio][data-model-id]")]
         .filter(shown)
         .map((el) => el.dataset.modelId);
-      problems.push(
+      blocking.push(
         offered.length ? `no ${model}; menu offers ${offered.join(", ")}` : `no ${model} entry`,
       );
     } else if (
@@ -258,7 +323,7 @@ async function settings({ model, effort }, safe) {
         () => item.getAttribute("aria-checked") === "true" || reads(model),
       ))
     ) {
-      problems.push(`${model} would not stick`);
+      blocking.push(`${model} would not stick`);
     }
   }
 
@@ -266,7 +331,7 @@ async function settings({ model, effort }, safe) {
   // the prompt about to be typed. It is a no-op anyway when the model's own
   // click already closed the tree.
   void dismiss(safe);
-  return problems;
+  return { blocking, noted };
 }
 
 async function openMenu(picker) {
@@ -307,23 +372,27 @@ async function openEffort() {
 // Thinking first: choosing an effort closes the submenu behind it, while a
 // switch leaves everything standing.
 async function effortAndThinking(effort) {
-  const problems = [];
-  if (!(await openEffort())) return ["the effort submenu would not open"];
+  const blocking = [];
+  const noted = [];
+  if (!(await openEffort())) {
+    const why = "the effort submenu would not open";
+    return effort ? { blocking: [why], noted: [] } : { blocking: [], noted: [why] };
+  }
 
   const thinking = byText("menuitemcheckbox", /thinking/i);
   if (!thinking) {
-    problems.push("no thinking switch found");
+    noted.push("no thinking switch found");
   } else if (thinking.getAttribute("aria-checked") !== "true") {
     const on = await choose(thinking, () => thinking.getAttribute("aria-checked") === "true");
-    if (!on) problems.push("thinking would not turn on");
+    if (!on) noted.push("thinking stayed off");
   }
 
-  if (!effort) return problems;
+  if (!effort) return { blocking, noted };
 
   const pick = `[role=menuitemradio][data-effort-id="${effort.id}"]`;
   if (!find(pick) && !(await openEffort())) {
-    problems.push(`could not get back to the effort menu for ${effort.label}`);
-    return problems;
+    blocking.push(`could not get back to the effort menu for ${effort.label}`);
+    return { blocking, noted };
   }
 
   const item = find(pick);
@@ -331,12 +400,12 @@ async function effortAndThinking(effort) {
     const offered = [...document.querySelectorAll("[role=menuitemradio][data-effort-id]")]
       .filter(shown)
       .map((el) => el.dataset.effortId);
-    problems.push(
+    blocking.push(
       offered.length
         ? `no ${effort.label}; menu offers ${offered.join(", ")}`
         : `no ${effort.label} entry`,
     );
-    return problems;
+    return { blocking, noted };
   }
 
   const took = await choose(
@@ -345,8 +414,8 @@ async function effortAndThinking(effort) {
       item.getAttribute("aria-checked") === "true" ||
       new RegExp(effort.label, "i").test(document.querySelector(PICKER)?.textContent ?? ""),
   );
-  if (!took) problems.push(`${effort.label} would not stick`);
-  return problems;
+  if (!took) blocking.push(`${effort.label} would not stick`);
+  return { blocking, noted };
 }
 
 // The composer is a ProseMirror document, not a textarea: assigning its text
@@ -372,13 +441,91 @@ function fill(editor, text) {
   return Boolean(editor.textContent.trim());
 }
 
+// The button is the same one a person would reach for; the composer also sends
+// on enter, which is the fallback. Either way the proof is the box going empty.
+function caretToEnd(el) {
+  const range = document.createRange();
+  range.selectNodeContents(el);
+  range.collapse(false);
+  const selection = getSelection();
+  selection.removeAllRanges();
+  selection.addRange(range);
+}
+
+async function submit(editor) {
+  // Sending is proved three ways, because the composer this started in may be
+  // replaced wholesale by the chat it turns into: the box goes empty, or the
+  // element is no longer in the document, or the address is a chat.
+  const sent = () =>
+    !editor.isConnected ||
+    !editor.textContent.trim() ||
+    /\/chat\//.test(location.pathname);
+
+  const enabled = () => {
+    const el = find(SEND);
+    return el && !el.disabled && el.getAttribute("aria-disabled") !== "true" ? el : null;
+  };
+
+  // The send button stays disabled until the app has registered the text, and
+  // that is also the app saying it is ready to be asked.
+  await settle(() => Boolean(enabled()), 2500);
+
+  // Three ways to ask, each tried on its own and checked before the next, so
+  // that a send which did work is never asked for twice in a row.
+  const ways = [
+    () => {
+      const button = enabled();
+      if (button) press(button);
+    },
+    () => {
+      // The element's own click, which is the path the app's own code uses.
+      enabled()?.click();
+    },
+    () => {
+      // The composer sends on enter like any other — but only with the caret
+      // in it, which a trip through the menus may have taken.
+      editor.focus();
+      caretToEnd(editor);
+      key(editor, "Enter");
+    },
+  ];
+
+  for (let round = 0; round < 2; round++) {
+    for (const ask of ways) {
+      if (sent()) return null;
+      ask();
+      if (await settle(sent, 1500)) return null;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  }
+
+  return enabled()
+    ? "asked six ways and nothing went"
+    : find(SEND)
+      ? "the send button stayed disabled"
+      : "no send button found";
+}
+
+// What claude.ai itself keeps about these settings. If the app remembers them
+// client-side, writing them before it starts would set the model and effort
+// outright and none of the menu driving above would be needed — so a failure
+// says what is there, which is the one thing that could retire all of it.
+function remembered() {
+  try {
+    const keys = Object.keys(localStorage).filter((k) => /model|effort|think/i.test(k));
+    return keys.length ? ` · it remembers: ${keys.slice(0, 6).join(", ")}` : " · it remembers nothing";
+  } catch {
+    return "";
+  }
+}
+
 (async () => {
   const request = fromUrl() ?? (await fromWorker());
   const prompt = request?.prompt;
   const model = request?.model;
   const effort = request?.effort;
   console.log(
-    "[homepage-links] prompt to hand over:",
+    "[space-launcher] prompt to hand over:",
     prompt ? `${prompt.length} chars` : "none — nothing in the fragment or the worker",
     model ? `on ${model}` : "",
   );
@@ -386,13 +533,6 @@ function fill(editor, text) {
 
   await bodyReady();
   const status = overlay([model, effort?.label].filter(Boolean).join(" · "));
-
-  // The picker and the composer arrive together, so the menus are driven while
-  // the composer is still being waited for rather than after it.
-  const settled = (async () => {
-    if (!(await waitFor(PICKER, PATIENCE))) return ["no model picker on the page"];
-    return settings({ model, effort }, null);
-  })();
 
   const editor = await waitFor(EDITOR);
   if (!editor) {
@@ -404,15 +544,45 @@ function fill(editor, text) {
   // One frame for the editor to finish mounting before touching anything.
   await new Promise((resolve) => requestAnimationFrame(resolve));
 
+  // Menus are driven only once the page has finished loading and the picker
+  // is there. Starting earlier, in parallel with the wait above, was quicker
+  // and much less reliable: a button that exists is not yet a button whose
+  // handlers are attached, and a press that lands before they are does
+  // nothing and says nothing.
+  const settled = (async () => {
+    if (document.readyState !== "complete") {
+      await Promise.race([
+        new Promise((resolve) => addEventListener("load", resolve, { once: true })),
+        new Promise((resolve) => setTimeout(resolve, 4000)),
+      ]);
+    }
+    if (!(await waitFor(PICKER, 8000))) {
+      const why = "no model picker on the page";
+      return model || effort ? { blocking: [why], noted: [] } : { blocking: [], noted: [why] };
+    }
+    return settings({ model, effort }, null);
+  })();
+
   // The settings first, so that typing the prompt is the last thing that
   // happens and the cursor is left where it belongs. The model has to be
   // chosen before the effort: picking one closes the menu.
-  // Thinking is checked even when no model or effort was asked for.
-  const trouble = await settled;
-  if (trouble.length) console.log("[homepage-links] settings:", trouble.join("; "));
+  // Thinking is set even when no model or effort was asked for, but it never
+  // stands in the way of sending.
+  const { blocking, noted } = await settled;
+  if (blocking.length || noted.length) {
+    console.log("[space-launcher] settings:", [...blocking, ...noted].join("; "));
+  }
 
   if (fill(editor, prompt)) {
-    if (trouble.length) status.failed(`Prompt ready. ${trouble.join("; ")}`);
+    // Only the model and the effort hold a send back: a chat answered by the
+    // wrong one cannot be taken back, while an unsent prompt costs a keystroke.
+    if (blocking.length) {
+      status.failed(`Prompt ready, unsent. ${blocking.join("; ")}${remembered()}`);
+      return;
+    }
+    const unsent = await submit(editor);
+    if (unsent) status.failed(`Prompt ready — ${unsent}`);
+    else if (noted.length) status.failed(`Sent. ${noted.join("; ")}`);
     else status.done();
   } else {
     status.failed("Could not fill the prompt box — your text is on the clipboard");

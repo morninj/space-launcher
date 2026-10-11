@@ -1,0 +1,92 @@
+# The photos packed into the Chrome Web Store build, by catalog id.
+# Whole ESA/Webb (CC BY 4.0) and NASA pictures only, each sharp enough to fill
+# a 4K screen. The ids are filenames in src/webb/ — run scripts/fetch-webb.py
+# first. One per line; anything after a # is ignored.
+
+# Nebulae and star formation
+pillarsofcreation_composite   # Pillars of Creation, NIRCam + MIRI
+weic2205a       # Cosmic Cliffs in Carina
+carinanebula3   # Carina Nebula jets
+weic2207b       # Southern Ring Nebula
+weic2212a       # Tarantula Nebula
+weic2219a       # Protostar L1527
+weic2301a       # NGC 346
+weic2303a       # Chameleon I
+weic2316a       # Rho Ophiuchi
+weic2319a       # Herbig-Haro 46/47
+weic2322b       # HH 211
+weic2326a       # Crab Nebula
+weic2330a       # Cassiopeia A
+weic2320b       # Ring Nebula
+weic2315b       # Orion Bar
+weic2328a       # Sagittarius C
+weic2407a       # NGC 604
+weic2411a       # Horsehead Nebula
+weic2415a       # Serpens Nebula
+weic2425a       # NGC 602
+weic2503a       # Lynds 483
+weic2506a       # Herbig-Haro 49/50
+weic2513a       # Cat's Paw Nebula
+weic2514a       # NGC 6072
+weic2518a       # Pismis 24
+weic2520a       # Sagittarius B2
+weic2601a       # Helix Nebula
+weic2605c       # Exposed Cranium Nebula
+weic2617a       # IRS 3 field
+weic2619a       # IC 348
+weic2620a       # NGC 7129
+FS-Tau          # FS Tau
+potm2510a       # Red Spider Nebula
+potm2607a       # Treasure Chest
+potm2606a       # A cosmic construction project
+potm2311a       # A protostar in Perseus
+potm2408a       # Peeking into Perseus
+potm2303a       # Cosmic seahorse
+weic2307a       # Wolf-Rayet 124
+potm2409a       # Westerlund 1
+potm2512a       # Dwarf stars in a glittering sky
+potm2404b       # NGC 6440
+potm2608a       # Star clusters and irregular clumps
+
+# Galaxies
+weic2208a       # Stephan's Quintet
+weic2211a       # Cartwheel Galaxy
+potm2212a       # NGC 7469
+potm2301a       # A spiral amongst thousands
+potm2302a       # Seeing triple
+potm2305a       # Webb peers behind bars
+potm2306a       # Clash of the Titans
+potm2307a       # The life and times of dust
+potm2308b       # M51
+potm2310b       # M83
+potm2309a       # NGC 6822
+potm2402a       # A galactic treasury
+potm2405a       # Fireworks of stellar starbursts
+potm2405b       # NGC 4449
+potm2407a       # Messier 106
+potm2410a       # Phantom Galaxy
+potm2411a       # Tracing spiral arms
+potm2412a       # A local galaxy
+weic2420a       # Arp 142
+weic2423a       # Arp 107
+weic2426a       # IC 2163 and NGC 2207
+potm2502a       # A star-forming spiral
+potm2506a       # A starburst in infrared
+potm2511a       # A dance of dwarf galaxies
+potm2602a       # The stellar lifecycle in a nearby spiral
+potm2604b       # Messier 77
+weic2612a       # Cigar Galaxy, M82
+weic2615b       # Centaurus A
+sombrerogalaxy1 # Sombrero Galaxy
+WLMb            # Dwarf galaxy WLM
+weic2611a       # Terzan 5
+
+# Deep fields, clusters, and Neptune
+weic2209a       # Webb's First Deep Field
+weic2305a       # Pandora's Cluster
+weic2327a       # MACS0416
+elgordo1        # El Gordo
+udf-a           # Hubble Ultra Deep Field, by Webb
+bullet-cluster  # Bullet Cluster
+potm2609a       # Galaxies in a cosmic house of mirrors
+weic2214d       # Neptune

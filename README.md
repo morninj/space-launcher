@@ -1,23 +1,73 @@
-# Launcher
+# Space Launcher
 
 A Chrome extension that replaces the new tab page with a keyboard-driven list
-of links, over a generative background. Everything is local to the extension:
-no accounts, no network, no build step.
+of links, over a photograph from the James Webb Space Telescope — a different
+one each time. Everything is local to the extension: no accounts, no
+analytics, no server. See [PRIVACY.md](PRIVACY.md).
+
+![The list over the Pillars of Creation](store/screenshots/1-list.png)
+
+## Installing
+
+From the Chrome Web Store, once it's listed there. That version carries about
+eighty photos at 4K.
+
+Or from source, with the full collection (macOS, since the photo script uses
+`sips`):
 
 ```
-chrome://extensions → Developer mode → Load unpacked → this repo's src/
+git clone https://github.com/morninj/space-launcher && cd space-launcher
+python3 scripts/fetch-webb.py     # the photos, into src/webb/ — a few GB
+chrome://extensions → Developer mode → Load unpacked → src/
 ```
 
-The manifest carries a `key`, which pins the extension's ID to
+Without the photos, the page falls back to a generative background (see
+below), so `src/` also works as it is.
+
+## The photos
+
+The photos come from ESA/Webb (esawebb.org/images), NASA
+(science.nasa.gov/mission/webb), and the independent processors on Wikimedia
+Commons who build their own pictures from Webb's public data — observations
+only, no charts, artwork or annotated copies, with a release the sources share
+taken once. Each photo sharp enough for a 6K screen is kept whole (`SCREEN` and
+`SHARP` in the script), and the big mosaics are also cut into full-resolution
+close-ups, which is where most of the collection comes from: a few hundred
+pictures and a few gigabytes, so they're fetched rather than committed. Rerun
+the script now and then to pick up new releases; it only downloads what isn't
+already there. The corner of the page says what the photo is, who to credit,
+and links to its page. Without the photos the page falls back to the generative
+background described below.
+
+The store package can't carry gigabytes, so `scripts/build-store.py` builds it
+from the photos listed in `store/photos.txt`: ESA/Webb (CC BY 4.0) and NASA
+pictures only, scaled to cover a 4K screen. It writes
+`dist/space-launcher-<version>.zip` without the manifest's `key`, which the
+store rejects, and leaves an unpacked copy in `dist/space-launcher/` to try
+first. Load that one with the source copy disabled, since only one extension
+can own the new tab page. The listing's text, screenshots and permission
+justifications are in `store/listing.md`.
+
+Space Launcher is not affiliated with or endorsed by NASA, ESA, CSA, STScI, or
+Anthropic.
+
+## The extension's ID
+
+The manifest in `src/` carries a `key`, which pins an unpacked copy's ID to
 `cehfjfbjbolhjacpjldfgeihceipjcld`. That matters more than it looks: Chrome
 files an extension's stored data under its ID, and an unpacked extension with
 no `key` takes its ID from the folder path — so moving or renaming the folder
-would orphan every saved link. With the key in place the ID never moves.
+would orphan every saved link. With the key in place the ID never moves. (The
+store version has an ID of its own, and its own saved links.)
 
 ## Using it
 
 The list opens with focus in the search box and nothing selected. Type to
 filter, or step into the list and work from the keyboard.
+
+`Ctrl+L` (Control, not ⌘) brings the list up in the current tab from any page,
+leaving the page you were on one Back away. Chrome assigns it on install; if it
+didn't take, or to change it, set it at `chrome://extensions/shortcuts`.
 
 ### In the search box
 
@@ -27,6 +77,7 @@ filter, or step into the list and work from the keyboard.
 | `1`–`9` | on an empty box, jumps to that row — opens a link, steps into a folder |
 | `↓` | steps into the list |
 | `↑` `↓` | while searching, walk the results without leaving the box |
+| `→` | opens a folder among the results, in place, with the way down to it unfolded |
 | `Enter` | opens the selected result; on a heading, unfolds the list down to it |
 | `Shift+Enter` | opens it in a new tab |
 | `c ` *prompt* | hands the box to Claude; a letter or two picks model and effort |
@@ -62,9 +113,10 @@ its own: leave the URL blank when adding, or add a child to an existing link.
 
 Typing `c` and a space in the search box hands it over to Claude: the list
 stands aside, and one row shows what will be asked. The space is what arms it,
-so a lone `c` is still an ordinary search. `Enter` opens a new chat at claude.ai
-and puts the prompt in the composer — it does not send it, so there is always a
-chance to read it back before you commit.
+so a lone `c` is still an ordinary search. `Enter` turns the tab into a new chat
+at claude.ai, sets whatever model and effort were asked for, types the prompt in
+and sends it — asking is the last thing that happens on a new tab page, so
+nothing is left behind it.
 
 A letter between the `c` and the space picks the model — `cf` Fable, `co` Opus,
 `cs` Sonnet, `ch` Haiku — and a second letter picks the effort: `l` low, `m`
@@ -117,11 +169,14 @@ The composer is a ProseMirror document, so the text is typed in rather than
 assigned — assigning would leave the editor's own state untouched and the
 placeholder showing.
 
-All of the menu driving is best effort: a prompt in the box under the wrong
-settings beats no prompt at all, so whatever fails only says so in that corner
-— "Prompt ready. High would not stick" — and leaves the text where you can
-still use it. If the composer cannot be filled at all, the prompt goes to the
-clipboard instead, so nothing you typed is lost.
+Sending is the one thing that waits on everything else having worked. A chat
+opened on the wrong model cannot be taken back, while an unsent prompt costs a
+keystroke — so if the model, the effort or the thinking switch did not take,
+the text is left in the composer and the corner says why: "Prompt ready,
+unsent. High would not stick". The send itself is the same button a person
+would reach for, with enter in the composer as the fallback, and the proof
+either worked is the box going empty. If the composer cannot be filled at all,
+the prompt goes to the clipboard instead, so nothing you typed is lost.
 
 ### With the mouse
 
@@ -157,7 +212,8 @@ Chrome leaves the omnibox alone. The page asks for this itself rather than the
 worker watching `tabs.onCreated`, because a tab Chrome has just opened reports
 no URL at all — there is nothing there to recognize a new tab by.
 
-**The background.** `background-art.js` grows filaments through a value-noise
+**The generative background.** The fallback when `src/webb/` is empty: `webb.js`
+loads it only then. `background-art.js` grows filaments through a value-noise
 flow field, over a still haze that keeps the empty parts of the screen from
 being empty. What the filaments draw stays on the canvas, which is the whole
 effect — but the currents barely move, so filaments funnel onto the same
@@ -177,26 +233,28 @@ uninstalled. Losing an extension's ID — by loading it from a new path without 
 
 So `tools/backup-links.py` snapshots the list into `backups/`. It reads
 Chrome's own storage for the extension: finding it by the ID derived from the
-manifest key, across every Chrome profile; copying the LevelDB directory first,
+manifest key (or the one given as its argument — the store version's, say,
+from `chrome://extensions`), across every Chrome profile; copying the LevelDB directory first,
 since Chrome holds a lock on it; and pulling the JSON straight out of the log.
 It writes `backups/links-YYYYMMDD-HHMMSS.json` only when the content differs
 from the newest snapshot, and keeps the last 60 — so that is 60 distinct
 states, not 60 copies of one.
 
-`tools/com.morninj.launcher-backup.plist` runs it every ten minutes and at
-login. To install it:
+`tools/space-launcher-backup.plist` runs it every ten minutes and at login.
+To install it, from the repo:
 
 ```sh
-cp tools/com.morninj.launcher-backup.plist ~/Library/LaunchAgents/
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.morninj.launcher-backup.plist
+sed -e "s|REPO|$PWD|" -e "s|HOME|$HOME|g" tools/space-launcher-backup.plist \
+  > ~/Library/LaunchAgents/space-launcher-backup.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/space-launcher-backup.plist
 ```
 
-It logs to `~/Library/Logs/launcher-backup.log`, and only writes a line when it
+It logs to `~/Library/Logs/space-launcher-backup.log`, and only writes a line when it
 takes a snapshot, so an empty log means nothing has changed. Run it by hand any
 time with `python3 tools/backup-links.py`. To stop it:
 
 ```sh
-launchctl bootout gui/$(id -u)/com.morninj.launcher-backup
+launchctl bootout gui/$(id -u)/space-launcher-backup
 ```
 
 Snapshots hold whatever URLs are in the list, so `backups/` is deliberately

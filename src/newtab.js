@@ -1,18 +1,24 @@
+// What a first-time install starts with: a few common places, and a folder to
+// show that rows nest. Replaced wholesale by whatever is saved.
 const DEFAULT_LINKS = [
-  { id: "asana", title: "Asana", url: "https://app.asana.com/" },
   { id: "gmail", title: "Gmail", url: "https://mail.google.com/" },
   { id: "calendar", title: "Calendar", url: "https://calendar.google.com/" },
+  { id: "github", title: "GitHub", url: "https://github.com/" },
+  {
+    id: "webb",
+    title: "Webb",
+    url: "",
+    collapsed: true,
+    children: [
+      { id: "esawebb", title: "ESA/Webb pictures", url: "https://esawebb.org/images/" },
+      { id: "nasawebb", title: "NASA Webb mission", url: "https://science.nasa.gov/mission/webb/" },
+    ],
+  },
 ];
 
 const list = document.getElementById("links");
 const search = document.getElementById("search");
 
-// Chrome focuses the omnibox on its new tab page and ignores focus() from an
-// override, so this copy of the page hands itself to the service worker: it
-// opens an ordinary tab on the same page in this slot and closes this one.
-// The ?focused mark keeps that copy from asking again — and, because it is no
-// longer the new tab URL exactly, keeps Chrome's focus out of the omnibox.
-if (!location.search) chrome.runtime.sendMessage("refocus");
 let links = DEFAULT_LINKS;
 let rows = []; // flattened visible rows; `selected` indexes into this
 let selected = 0;
@@ -30,7 +36,7 @@ async function load() {
     const stored = await chrome.storage.sync.get({ links: DEFAULT_LINKS });
     links = stored.links;
   } catch (error) {
-    console.error("[launcher] could not read storage", error);
+    console.error("[space-launcher] could not read storage", error);
   }
   collapseAll();
   render();
@@ -73,7 +79,7 @@ async function save() {
   try {
     await chrome.storage.sync.set({ links });
   } catch (error) {
-    console.error("[launcher] could not write storage", error);
+    console.error("[space-launcher] could not write storage", error);
   }
 }
 
@@ -176,14 +182,24 @@ function matches(link) {
 // them back, and a hit is worth the same however deep it sat.
 function searchRows() {
   const out = [];
-  const walk = (siblings, parent) => {
+  // The folders a result sits in, gathered on the way down: flattened results
+  // lose the indentation that would otherwise say where each one came from.
+  const walk = (siblings, parent, trail) => {
     siblings.forEach((link, index) => {
-      if (matches(link)) out.push({ link, parent, siblings, index, depth: 0 });
-      walk(childrenOf(link), link);
+      if (matches(link)) out.push({ link, parent, siblings, index, depth: 0, trail });
+      walk(childrenOf(link), link, [...trail, link.title]);
     });
   };
-  walk(links, null);
+  walk(links, null, []);
   return out;
+}
+
+// Enough of the path to place a result, from the nearest folder outwards. Deep
+// ones are cut off at the far end, since the near end is what identifies it.
+function pathLabel(trail) {
+  if (!trail?.length) return "";
+  const near = trail.slice(-2);
+  return (trail.length > near.length ? "… / " : "") + near.join(" / ");
 }
 
 function visibleRows() {
@@ -292,6 +308,10 @@ function linkRow(row, position) {
     focusSelected();
   });
 
+  const path = document.createElement("span");
+  path.className = "path";
+  path.textContent = pathLabel(row.trail);
+
   const actions = document.createElement("div");
   actions.className = "actions";
   actions.append(
@@ -305,7 +325,7 @@ function linkRow(row, position) {
     }),
   );
 
-  li.append(num, tree, label, twist, actions);
+  li.append(num, tree, label, twist, path, actions);
   // Search results are a flat view of a tree, so there is no order in them to
   // rearrange; dragging is for the list as it is kept.
   if (!query) draggable(li, row);
@@ -707,12 +727,17 @@ async function askClaude({ prompt, model, effort }) {
       trouble(answer.error);
       return;
     }
+    if (!answer?.url) {
+      trouble("the worker had nowhere to send it");
+      return;
+    }
+    askTrouble = null;
+    // This tab becomes the chat: asking is the last thing that happens on a
+    // new tab page, so there is nothing here worth keeping behind it.
+    location.assign(answer.url);
   } catch (error) {
     trouble(String(error?.message ?? error));
-    return;
   }
-  askTrouble = null;
-  reset(); // the box is emptied for whatever comes next
 }
 
 // Enter on a result: links open, headings are revealed in the list.
@@ -795,6 +820,13 @@ function move(delta) {
   focusSelected();
 }
 
+function caretAtEnd() {
+  return (
+    search.selectionStart === search.selectionEnd &&
+    search.selectionStart === search.value.length
+  );
+}
+
 function focusSelected() {
   if (query) return; // results are steered from the search box
   if (idle) {
@@ -808,6 +840,8 @@ function focusSelected() {
 
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
 
+// The row lights up and the list recedes before the page goes.
+const panel = document.querySelector("main");
 // The row lights up and the list recedes before the page goes.
 function launch(link) {
   const li = list.querySelector(`li[data-id="${CSS.escape(link.id)}"]`);
@@ -891,6 +925,15 @@ document.addEventListener("keydown", (event) => {
     } else if (event.key === "ArrowUp" && query) {
       event.preventDefault();
       move(-1); // walks the results; focus stays in the box
+    } else if (event.key === "ArrowRight" && query && caretAtEnd()) {
+      // A folder among the results opens where it belongs, with the way down
+      // to it unfolded. Only from the end of the box, so arrowing back through
+      // what you typed still works.
+      const row = rows[selected];
+      if (row && childrenOf(row.link).length) {
+        event.preventDefault();
+        reveal(row.link);
+      }
     } else if (event.key === "Enter" && typedUrl()) {
       event.preventDefault();
       open({ id: "", url: typedUrl() }, event.shiftKey);
@@ -1010,10 +1053,14 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
-normalize();
-collapseAll();
-render();
-// Takes hold in the replacement tab; in the tab Chrome opened it does nothing,
-// because the focus the omnibox has there is not ours to take.
-search.focus();
-load();
+// The copy Chrome opened is about to be replaced, so it builds nothing: see
+// refocus.js, which also brings the page up anyway if the swap never comes.
+unlessReplaced(() => {
+  normalize();
+  collapseAll();
+  render();
+  // Takes hold in the replacement tab; in the tab Chrome opened the focus the
+  // omnibox has is not ours to take.
+  search.focus();
+  load();
+});
